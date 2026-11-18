@@ -1,0 +1,51 @@
+#!/bin/bash
+set -euxo pipefail
+dnf install -y python3 python3-pip
+mkdir -p /opt/sample-app
+cat > /opt/sample-app/app.py <<'PY'
+from flask import Flask, jsonify
+import os
+import pymysql
+app = Flask(__name__)
+def connection():
+    return pymysql.connect(host=os.environ['DB_HOST'], port=int(os.environ['DB_PORT']), user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'], database=os.environ['DB_NAME'], connect_timeout=5)
+@app.get('/health')
+def health(): return jsonify(status='ok', tier='app')
+@app.get('/api/message')
+def message():
+    try:
+        with connection() as db:
+            with db.cursor() as cur:
+                cur.execute('CREATE TABLE IF NOT EXISTS visits (id INT AUTO_INCREMENT PRIMARY KEY, message VARCHAR(255) NOT NULL)')
+                cur.execute("INSERT INTO visits (message) VALUES ('Hello from Flask and RDS MySQL')")
+                db.commit()
+                cur.execute('SELECT COUNT(*) FROM visits')
+                count = cur.fetchone()[0]
+        return jsonify(message='Hello from the app tier!', database='connected', visits=count)
+    except Exception as exc:
+        app.logger.exception('database error')
+        return jsonify(message='App is running; database is not ready yet', error=str(exc)), 503
+app.run(host='0.0.0.0', port=8080)
+PY
+python3 -m pip install --no-cache-dir flask pymysql
+cat > /etc/sample-app.env <<'ENV'
+DB_HOST=${db_endpoint}
+DB_PORT=${db_port}
+DB_NAME=${db_name}
+DB_USER=${db_username}
+DB_PASSWORD=${db_password}
+ENV
+cat > /etc/systemd/system/sample-app.service <<'UNIT'
+[Unit]
+After=network-online.target
+[Service]
+WorkingDirectory=/opt/sample-app
+EnvironmentFile=/etc/sample-app.env
+ExecStart=/usr/bin/python3 /opt/sample-app/app.py
+Restart=always
+User=root
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now sample-app
